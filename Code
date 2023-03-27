@@ -1,0 +1,134 @@
+import pandas as pd
+import os
+import numpy as np
+import matplotlib.pyplot as plt
+
+# Bollinger Band Mean Reversion Strategy with a Stop Loss and Take Profit
+
+# Replace 'your_file_name.csv' with the name of your CSV file
+file_name = 'EURUSD=X.csv'
+
+# Set the path to your 'Downloads' folder
+downloads_folder = os.path.join(os.path.expanduser('~'), 'Downloads')
+
+# Create the full path to your CSV file
+csv_file_path = os.path.join(downloads_folder, file_name)
+
+# Read the CSV file using pandas
+data = pd.read_csv(csv_file_path, parse_dates=['Date'])
+data.set_index('Date', inplace=True)
+
+# Calculate daily returns
+data['Returns'] = data['Close'].pct_change()
+
+# Bollinger Bands parameters
+lookback = 20
+num_std = 2
+
+# Calculate the moving average and standard deviation
+data['MovingAverage'] = data['Close'].rolling(window=lookback).mean()
+data['StandardDeviation'] = data['Close'].rolling(window=lookback).std()
+
+# Calculate the Bollinger Bands
+data['UpperBand'] = data['MovingAverage'] + (data['StandardDeviation'] * num_std)
+data['LowerBand'] = data['MovingAverage'] - (data['StandardDeviation'] * num_std)
+
+# Criteria for hammer and shooting star candles
+body_threshold = 0.25
+shadow_threshold = 2
+
+# Identify hammer and shooting star candles
+data['Hammer'] = (
+    (data['Open'] - data['Close']).abs() / (data['High'] - data['Low']) <= body_threshold
+) & (
+    (data['High'] - np.maximum(data['Open'], data['Close'])) / (data['High'] - data['Low']) <= body_threshold
+) & (
+    (data['Low'] - np.minimum(data['Open'], data['Close'])) / (data['High'] - data['Low']) >= shadow_threshold
+)
+
+data['ShootingStar'] = (
+    (data['Open'] - data['Close']).abs() / (data['High'] - data['Low']) <= body_threshold
+) & (
+    (data['Low'] - np.minimum(data['Open'], data['Close'])) / (data['High'] - data['Low']) <= body_threshold
+) & (
+    (data['High'] - np.maximum(data['Open'], data['Close'])) / (data['High'] - data['Low']) >= shadow_threshold
+)
+
+# Implement the trading strategy
+data['LongEntryCondition'] = (data['Close'] < data['LowerBand']) & data['Hammer'].shift(1)
+data['ShortEntryCondition'] = (data['Close'] > data['UpperBand']) & data['ShootingStar'].shift(1)
+data['LongStopEntry'] = data['High'].shift(1) + 0.0001
+data['ShortStopEntry'] = data['Low'].shift(1) - 0.0001
+data['Position'] = np.nan
+
+# Define position
+for i in range(lookback, len(data)):
+    if data['LongEntryCondition'][i] and data['High'][i] >= data['LongStopEntry'][i]:
+        data.at[data.index[i], 'Position'] = 1
+    elif data['ShortEntryCondition'][i] and data['Low'][i] <= data['ShortStopEntry'][i]:
+        data.at[data.index[i], 'Position'] = -1
+    else:
+        data.at[data.index[i], 'Position'] = 0
+
+# Calculate stop loss and take profit
+data['PrevHigh'] = data['High'].shift(1)
+data['PrevLow'] = data['Low'].shift(1)
+data['LongStopLoss'] = data['PrevLow'] - 0.0001
+data['ShortStopLoss'] = data['PrevHigh'] + 0.0001
+data['LongTakeProfit'] = data['Close'] + ((data['Close'] - data['LongStopLoss']) * 1.5)
+data['ShortTakeProfit'] = data['Close'] - ((data['ShortStopLoss'] - data['Close']) * 1.5)
+
+# Apply stop loss and take profit
+data['LongTrade'] = data['Position'] == 1
+data['ShortTrade'] = data['Position'] == -1
+data['LongStopLossTrigger'] = data['Close'].shift(1) < data['LongStopLoss']
+data['ShortStopLossTrigger'] = data['Close'].shift(1) > data['ShortStopLoss']
+data['LongTakeProfitTrigger'] = data['Close'].shift(1) > data['LongTakeProfit']
+data['ShortTakeProfitTrigger'] = data['Close'].shift(1) < data['ShortTakeProfit']
+
+data.loc[data['LongTrade'] & (data['LongStopLossTrigger'] | data['LongTakeProfitTrigger']), 'Position'] = 0
+data.loc[data['ShortTrade'] & (data['ShortStopLossTrigger'] | data['ShortTakeProfitTrigger']), 'Position'] = 0
+
+# Calculate daily strategy returns
+data['StrategyReturns'] = data['Position'].shift(1) * data['Returns']
+
+# Calculate cumulative strategy returns
+data['CumulativeReturns'] = (1 + data['StrategyReturns']).cumprod()
+
+# Calculate average trade PnL, total return, and plot the cumulative equity graph
+average_trade_pnl = data['StrategyReturns'].mean()
+total_return = data['CumulativeReturns'].iloc[-1] - 1
+
+print(f"Average trade PnL: {average_trade_pnl:.4f}")
+print(f"Total return: {total_return:.4f}")
+
+plt.figure(figsize=(10, 5))
+data['CumulativeReturns'].plot(title='Cumulative Equity Graph')
+plt.ylabel('Cumulative Returns')
+plt.show()
+
+# Generate Bollinger Bands and price chart
+plt.figure(figsize=(10, 5))
+data[['Close', 'UpperBand', 'LowerBand']].plot(title='Bollinger Bands')
+plt.ylabel('Price')
+plt.show()
+
+# Identify trade entries and exits
+data['TradeEntry'] = (data['Position'].shift(-1) != 0) & (data['Position'] == 0)
+data['TradeExit'] = (data['Position'].shift(-1) == 0) & (data['Position'] != 0)
+
+# Filter trades and create a summary table
+trade_summary = data[data['TradeEntry'] | data['TradeExit']].copy()
+trade_summary['HoldingPeriod'] = trade_summary.index.to_series().diff().shift(-1).dt.days
+
+# Calculate PnL for each trade
+trade_summary['PnL'] = (trade_summary['StrategyReturns'] + 1).cumprod().pct_change().shift(-1)
+
+# Select relevant columns for the summary table
+trade_summary = trade_summary[['TradeEntry', 'Close', 'LongStopLoss', 'ShortStopLoss', 'LongTakeProfit', 'ShortTakeProfit', 'HoldingPeriod', 'PnL']]
+
+# Rename columns for clarity
+trade_summary.columns = ['TradeEntry', 'EntryPrice', 'LongStopLoss', 'ShortStopLoss', 'LongTakeProfit', 'ShortTakeProfit', 'HoldingPeriod', 'PnL']
+
+# Display the trade summary table
+print(trade_summary)
